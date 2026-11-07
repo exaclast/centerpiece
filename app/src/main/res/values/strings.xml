@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Centerpiece</string>
+    <string name="accessibility_service_description">Enables Centerpiece to dock in the Googlebook OS top status bar and remain visible above maximized desktop windows.</string>
+</resources>

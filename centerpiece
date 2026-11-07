@@ -1,0 +1,476 @@
+#!/usr/bin/env bash
+# Centerpiece CLI helper for Googlebook OS
+# Communicates with Centerpiece top status bar overlay via direct REST daemon (Port 7420)
+# with automatic fallback to ADB Broadcast interface.
+
+set -e
+
+PACKAGE="com.exaclast.centerpiece"
+PORT=7420
+
+# Detect host endpoint (Android host from Linux VM is the default gateway, or 127.0.0.1 if on host)
+GW_IP=$(ip route show default 2>/dev/null | awk '{print $3}' | head -n1)
+CANDIDATES=("127.0.0.1" "$GW_IP" "10.149.152.128")
+REST_HOST=""
+
+if command -v curl >/dev/null 2>&1; then
+    for host in "${CANDIDATES[@]}"; do
+        if [ -n "$host" ] && curl -s -m 0.3 "http://$host:$PORT/v1/health" >/dev/null 2>&1; then
+            REST_HOST="$host"
+            break
+        fi
+    done
+fi
+
+function send_broadcast() {
+    local action="$1"
+    shift
+    local extras=("$@")
+
+    if command -v adb >/dev/null 2>&1; then
+        adb shell am broadcast --user current -p "$PACKAGE" -a "$action" "${extras[@]}"
+    elif command -v am >/dev/null 2>&1; then
+        am broadcast --user current -p "$PACKAGE" -a "$action" "${extras[@]}"
+    else
+        echo "Error: Neither REST daemon nor 'adb'/'am' command reachable." >&2
+        exit 1
+    fi
+}
+
+function usage() {
+    cat <<EOF
+Centerpiece CLI - Modular Top-Bar Status Utility for Googlebook OS
+
+Usage:
+  centerpiece register <id> <title> [subtitle] [priority]
+  centerpiece update <id> <title> [subtitle] [priority]
+  centerpiece unregister <id>
+  centerpiece list
+  centerpiece status
+  centerpiece sysmon [both|cpu|ram|status]
+  centerpiece awake [toggle|on|off|15m|30m|1h|status]
+  centerpiece visibility [status|fullscreen <on|off>|mode <disabled|blacklist|whitelist>|add <pkg>|remove <pkg>|clear]
+  centerpiece layout [--align center|left|right] [--offset-x <dp>] [--offset-y <dp>] [--height <dp>] [--reset]
+  centerpiece toggle
+  centerpiece show
+  centerpiece hide
+  centerpiece sample
+
+Transport:
+  REST HTTP: $(if [ -n "$REST_HOST" ]; then echo "Active (http://$REST_HOST:$PORT)"; else echo "Offline (Falling back to ADB)"; fi)
+
+Examples:
+  ./centerpiece register build "Build" "Passing" 850
+  ./centerpiece update build "Build" "Failed" 850
+  ./centerpiece unregister build
+  ./centerpiece list
+  ./centerpiece toggle
+EOF
+}
+
+COMMAND="$1"
+case "$COMMAND" in
+    register)
+        ID="$2"
+        TITLE="$3"
+        SUBTITLE="$4"
+        PRIORITY="${5:-500}"
+        if [ -z "$ID" ] || [ -z "$TITLE" ]; then
+            echo "Error: 'register' requires <id> and <title>" >&2
+            usage
+            exit 1
+        fi
+        if [ -n "$REST_HOST" ]; then
+            JSON="{\"id\":\"$ID\",\"title\":\"$TITLE\",\"priority\":$PRIORITY"
+            if [ -n "$SUBTITLE" ]; then
+                JSON="$JSON,\"subtitle\":\"$SUBTITLE\""
+            fi
+            JSON="$JSON}"
+            curl -s -X POST "http://$REST_HOST:$PORT/v1/chips" \
+                -H "Content-Type: application/json" \
+                -d "$JSON"
+            echo ""
+        else
+            ARGS=(--es id "$ID" --es title "$TITLE" --ei priority "$PRIORITY")
+            if [ -n "$SUBTITLE" ]; then
+                ARGS+=(--es subtitle "$SUBTITLE")
+            fi
+            send_broadcast "com.exaclast.centerpiece.REGISTER_WIDGET" "${ARGS[@]}"
+        fi
+        ;;
+
+    update)
+        ID="$2"
+        TITLE="$3"
+        SUBTITLE="$4"
+        PRIORITY="${5:-500}"
+        if [ -z "$ID" ]; then
+            echo "Error: 'update' requires <id>" >&2
+            usage
+            exit 1
+        fi
+        if [ -n "$REST_HOST" ]; then
+            JSON="{"
+            SEP=""
+            if [ -n "$TITLE" ]; then
+                JSON="$JSON\"title\":\"$TITLE\""
+                SEP=","
+            fi
+            if [ -n "$SUBTITLE" ]; then
+                JSON="$JSON$SEP\"subtitle\":\"$SUBTITLE\""
+                SEP=","
+            fi
+            if [ -n "$5" ]; then
+                JSON="$JSON$SEP\"priority\":$PRIORITY"
+            fi
+            JSON="$JSON}"
+            curl -s -X PUT "http://$REST_HOST:$PORT/v1/chips/$ID" \
+                -H "Content-Type: application/json" \
+                -d "$JSON"
+            echo ""
+        else
+            ARGS=(--es id "$ID")
+            if [ -n "$TITLE" ]; then
+                ARGS+=(--es title "$TITLE")
+            fi
+            if [ -n "$SUBTITLE" ]; then
+                ARGS+=(--es subtitle "$SUBTITLE")
+            fi
+            if [ -n "$5" ]; then
+                ARGS+=(--ei priority "$PRIORITY")
+            fi
+            send_broadcast "com.exaclast.centerpiece.UPDATE_WIDGET" "${ARGS[@]}"
+        fi
+        ;;
+
+    unregister|remove)
+        ID="$2"
+        if [ -z "$ID" ]; then
+            echo "Error: 'unregister' requires <id>" >&2
+            usage
+            exit 1
+        fi
+        if [ -n "$REST_HOST" ]; then
+            curl -s -X DELETE "http://$REST_HOST:$PORT/v1/chips/$ID"
+            echo ""
+        else
+            send_broadcast "com.exaclast.centerpiece.UNREGISTER_WIDGET" --es id "$ID"
+        fi
+        ;;
+
+    list)
+        if [ -n "$REST_HOST" ]; then
+            curl -s "http://$REST_HOST:$PORT/v1/chips"
+            echo ""
+        else
+            echo "Note: REST daemon not reachable; querying items requires REST connection." >&2
+            exit 1
+        fi
+        ;;
+
+    status)
+        if [ -n "$REST_HOST" ]; then
+            curl -s "http://$REST_HOST:$PORT/v1/status"
+            echo ""
+        else
+            echo "Note: REST daemon not reachable." >&2
+            exit 1
+        fi
+        ;;
+
+    toggle)
+        if [ -n "$REST_HOST" ]; then
+            curl -s -X POST "http://$REST_HOST:$PORT/v1/toggle"
+            echo ""
+        else
+            send_broadcast "com.exaclast.centerpiece.TOGGLE_SERVICE"
+        fi
+        ;;
+
+    layout)
+        shift
+        ALIGN=""
+        OFFSET_X=""
+        OFFSET_Y=""
+        HEIGHT=""
+        RESET=""
+
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --align|-a)
+                    ALIGN="$2"
+                    shift 2
+                    ;;
+                --offset-x|-x)
+                    OFFSET_X="$2"
+                    shift 2
+                    ;;
+                --offset-y|-y)
+                    OFFSET_Y="$2"
+                    shift 2
+                    ;;
+                --height|-H)
+                    HEIGHT="$2"
+                    shift 2
+                    ;;
+                --reset|-r)
+                    RESET="true"
+                    shift
+                    ;;
+                *)
+                    echo "Unknown layout option: $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        if [ -n "$REST_HOST" ]; then
+            if [ -z "$ALIGN" ] && [ -z "$OFFSET_X" ] && [ -z "$OFFSET_Y" ] && [ -z "$HEIGHT" ] && [ -z "$RESET" ]; then
+                curl -s "http://$REST_HOST:$PORT/v1/layout"
+                echo ""
+            else
+                JSON="{"
+                FIRST=1
+                if [ -n "$RESET" ]; then
+                    JSON="$JSON\"reset\":true"
+                else
+                    if [ -n "$ALIGN" ]; then
+                        JSON="$JSON\"alignment\":\"$ALIGN\""
+                        FIRST=0
+                    fi
+                    if [ -n "$OFFSET_X" ]; then
+                        if [ $FIRST -eq 0 ]; then JSON="$JSON,"; fi
+                        JSON="$JSON\"offsetX\":$OFFSET_X"
+                        FIRST=0
+                    fi
+                    if [ -n "$OFFSET_Y" ]; then
+                        if [ $FIRST -eq 0 ]; then JSON="$JSON,"; fi
+                        JSON="$JSON\"offsetY\":$OFFSET_Y"
+                        FIRST=0
+                    fi
+                    if [ -n "$HEIGHT" ]; then
+                        if [ $FIRST -eq 0 ]; then JSON="$JSON,"; fi
+                        JSON="$JSON\"heightDp\":$HEIGHT"
+                        FIRST=0
+                    fi
+                fi
+                JSON="$JSON}"
+                curl -s -X POST "http://$REST_HOST:$PORT/v1/layout" \
+                    -H "Content-Type: application/json" \
+                    -d "$JSON"
+                echo ""
+            fi
+        else
+            ARGS=()
+            if [ -n "$RESET" ]; then
+                ARGS+=(--ez reset true)
+            else
+                if [ -n "$ALIGN" ]; then ARGS+=(--es alignment "$ALIGN"); fi
+                if [ -n "$OFFSET_X" ]; then ARGS+=(--ei offset_x "$OFFSET_X"); fi
+                if [ -n "$OFFSET_Y" ]; then ARGS+=(--ei offset_y "$OFFSET_Y"); fi
+                if [ -n "$HEIGHT" ]; then ARGS+=(--ei height "$HEIGHT"); fi
+            fi
+            if [ ${#ARGS[@]} -eq 0 ]; then
+                echo "Note: Reading layout requires REST daemon. To configure layout via ADB:"
+                echo "  ./centerpiece layout --align center|left|right [--offset-x <dp>] [--offset-y <dp>] [--height <dp>] [--reset]"
+            else
+                send_broadcast "com.exaclast.centerpiece.SET_LAYOUT" "${ARGS[@]}"
+            fi
+        fi
+        ;;
+
+    show)
+        if [ -n "$REST_HOST" ]; then
+            curl -s -X POST "http://$REST_HOST:$PORT/v1/show"
+            echo ""
+        else
+            send_broadcast "com.exaclast.centerpiece.SHOW_OVERLAY"
+        fi
+        ;;
+
+    hide)
+        if [ -n "$REST_HOST" ]; then
+            curl -s -X POST "http://$REST_HOST:$PORT/v1/hide"
+            echo ""
+        else
+            send_broadcast "com.exaclast.centerpiece.HIDE_OVERLAY"
+        fi
+        ;;
+
+    sample)
+        if [ -n "$REST_HOST" ]; then
+            curl -s -X POST "http://$REST_HOST:$PORT/v1/chips" \
+                -H "Content-Type: application/json" \
+                -d '{"id":"terminal_task","title":"Terminal","subtitle":"Compiling...","priority":750}'
+            echo ""
+        else
+            send_broadcast "com.exaclast.centerpiece.REGISTER_WIDGET" \
+                --es id "terminal_task" \
+                --es title "Terminal" \
+                --es subtitle "Compiling..." \
+                --ei priority 750
+        fi
+        ;;
+
+    awake)
+        ACTION="${2:-toggle}"
+        MINUTES=0
+        case "$ACTION" in
+            15m|15) ACTION="on"; MINUTES=15 ;;
+            30m|30) ACTION="on"; MINUTES=30 ;;
+            60m|1h|60) ACTION="on"; MINUTES=60 ;;
+            on|enable) ACTION="on" ;;
+            off|disable) ACTION="off" ;;
+            toggle) ACTION="toggle" ;;
+            status) ACTION="status" ;;
+        esac
+
+        if [ "$ACTION" == "status" ]; then
+            if [ -n "$REST_HOST" ]; then
+                curl -s "http://$REST_HOST:$PORT/v1/awake"
+                echo ""
+            else
+                echo "Awake status only available via REST daemon"
+            fi
+        elif [ -n "$REST_HOST" ]; then
+            curl -s -X POST "http://$REST_HOST:$PORT/v1/awake" \
+                -H "Content-Type: application/json" \
+                -d "{\"action\":\"$ACTION\",\"minutes\":$MINUTES}"
+            echo ""
+        else
+            send_broadcast "com.exaclast.centerpiece.TOGGLE_AWAKE"
+        fi
+        ;;
+
+    sysmon)
+        MODE="${2:-status}"
+        case "$MODE" in
+            both|all)
+                MODE="BOTH"
+                ;;
+            cpu)
+                MODE="CPU_ONLY"
+                ;;
+            ram|mem|memory)
+                MODE="RAM_ONLY"
+                ;;
+            status)
+                MODE="status"
+                ;;
+            *)
+                MODE=$(echo "$MODE" | tr '[:lower:]' '[:upper:]')
+                ;;
+        esac
+
+        if [ "$MODE" == "status" ]; then
+            if [ -n "$REST_HOST" ]; then
+                curl -s "http://$REST_HOST:$PORT/v1/sysmon"
+                echo ""
+            else
+                echo "Sysmon status available via REST daemon"
+            fi
+        elif [ -n "$REST_HOST" ]; then
+            curl -s -X POST "http://$REST_HOST:$PORT/v1/sysmon" \
+                -H "Content-Type: application/json" \
+                -d "{\"mode\":\"$MODE\"}"
+            echo ""
+        else
+            echo "Changing sysmon mode requires REST daemon"
+        fi
+        ;;
+
+    visibility)
+        SUB="${2:-status}"
+        case "$SUB" in
+            status|get)
+                if [ -n "$REST_HOST" ]; then
+                    curl -s "http://$REST_HOST:$PORT/v1/visibility"
+                    echo ""
+                else
+                    echo "Visibility status available via REST daemon"
+                fi
+                ;;
+            fullscreen|fs)
+                VAL="${3:-on}"
+                BOOL="true"
+                if [ "$VAL" == "off" ] || [ "$VAL" == "false" ] || [ "$VAL" == "0" ]; then
+                    BOOL="false"
+                fi
+                if [ -n "$REST_HOST" ]; then
+                    curl -s -X POST "http://$REST_HOST:$PORT/v1/visibility" \
+                        -H "Content-Type: application/json" \
+                        -d "{\"hideInFullscreen\":$BOOL}"
+                    echo ""
+                else
+                    echo "Setting fullscreen rule requires REST daemon"
+                fi
+                ;;
+            mode)
+                MODE_VAL="${3:-disabled}"
+                if [ -n "$REST_HOST" ]; then
+                    curl -s -X POST "http://$REST_HOST:$PORT/v1/visibility" \
+                        -H "Content-Type: application/json" \
+                        -d "{\"mode\":\"$MODE_VAL\"}"
+                    echo ""
+                else
+                    echo "Setting filter mode requires REST daemon"
+                fi
+                ;;
+            add)
+                PKG="$3"
+                if [ -z "$PKG" ]; then
+                    echo "Usage: ./centerpiece visibility add <package>" >&2
+                    exit 1
+                fi
+                if [ -n "$REST_HOST" ]; then
+                    curl -s -X POST "http://$REST_HOST:$PORT/v1/visibility" \
+                        -H "Content-Type: application/json" \
+                        -d "{\"add\":\"$PKG\"}"
+                    echo ""
+                else
+                    echo "Adding package requires REST daemon"
+                fi
+                ;;
+            remove|rm)
+                PKG="$3"
+                if [ -z "$PKG" ]; then
+                    echo "Usage: ./centerpiece visibility remove <package>" >&2
+                    exit 1
+                fi
+                if [ -n "$REST_HOST" ]; then
+                    curl -s -X POST "http://$REST_HOST:$PORT/v1/visibility" \
+                        -H "Content-Type: application/json" \
+                        -d "{\"remove\":\"$PKG\"}"
+                    echo ""
+                else
+                    echo "Removing package requires REST daemon"
+                fi
+                ;;
+            clear)
+                if [ -n "$REST_HOST" ]; then
+                    curl -s -X POST "http://$REST_HOST:$PORT/v1/visibility" \
+                        -H "Content-Type: application/json" \
+                        -d "{\"clear\":true}"
+                    echo ""
+                else
+                    echo "Clearing packages requires REST daemon"
+                fi
+                ;;
+            *)
+                echo "Unknown visibility subcommand: $SUB" >&2
+                echo "Usage: ./centerpiece visibility [status|fullscreen <on|off>|mode <disabled|blacklist|whitelist>|add <pkg>|remove <pkg>|clear]"
+                exit 1
+                ;;
+        esac
+        ;;
+
+    help|--help|-h|"")
+        usage
+        ;;
+
+    *)
+        echo "Unknown command: $COMMAND" >&2
+        usage
+        exit 1
+        ;;
+esac
