@@ -1,3 +1,7 @@
+# Archived as BentoBar is a more mature project with the same goal
+
+
+
 # Centerpiece
 
 **Centerpiece** is an extensible top-bar utility engineered specifically for **Googlebook OS** (Android-based desktop platform). It occupies the central "dead space" of the top system bar—positioned horizontally between the system launcher/clock elements on the far left and the system status tray (quick settings, battery, Wi-Fi, notifications) on the far right.
